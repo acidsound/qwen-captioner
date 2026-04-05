@@ -40,6 +40,8 @@ SCENE_LINE_FORMAT = "MM:SS,mmm-MM:SS,mmm description text here"
 WINDOW_COVERAGE_TOLERANCE_MS = 1000
 # =========================
 
+TIMECODE_RE = re.compile(r"\b\d{2}:\d{2}(?:[,:]\d{3})?\b")
+
 
 def extract_frames_from_range(
     video_path: str,
@@ -257,6 +259,11 @@ def merge_adjacent_scenes(scenes: list, gap_tolerance_ms: int = 50) -> list:
     return merged
 
 
+def description_has_timecode(desc: str) -> bool:
+    """Return True when a description still contains timestamp text."""
+    return bool(TIMECODE_RE.search(desc))
+
+
 def is_valid(scenes: list, window_start: float, window_end: float) -> bool:
     """Validate scene analysis output."""
     if not scenes:
@@ -297,6 +304,8 @@ def is_valid(scenes: list, window_start: float, window_end: float) -> bool:
         if cleaned.startswith("description of"):
             return False
         if len(dl.strip("#*- ")) < 5:
+            return False
+        if "\n" in d or description_has_timecode(d):
             return False
         if e <= s:
             return False
@@ -346,6 +355,7 @@ def build_prompt(frames, frame_timestamps, ws: float, we: float, attempt: int = 
         f"- Do NOT split for minor camera movements (pan, zoom, angle change).\n"
         f"- Each scene must be at least 2 seconds. Merge shorter segments into the same scene.\n"
         f"- Describe ONLY what is visible. Do NOT hallucinate or guess.\n"
+        f"- Do NOT mention timestamps, time progression, or scene numbers in the description text.\n"
         f"- Keep each description to one concise sentence.\n"
         f"- Include: subject, action, camera angle, lighting, background.\n"
         f"- Start each line with MM:SS,mmm-MM:SS,mmm timestamp range.\n"
@@ -357,7 +367,8 @@ def build_prompt(frames, frame_timestamps, ws: float, we: float, attempt: int = 
             "\n\nIMPORTANT: Do NOT use placeholder text like 'scene description'. "
             "Write actual content describing what you see in each frame. "
             "Merge similar frames into the same scene (minimum 2 seconds per scene). "
-            f"Keep full coverage from {fmt(ws)} through {fmt(we)}."
+            f"Keep full coverage from {fmt(ws)} through {fmt(we)}. "
+            "Never include timestamps inside the description itself."
         )
     if attempt >= 2:
         base += (
@@ -417,7 +428,9 @@ def analyze(model, processor, config, frames, frame_timestamps, ws: float, we: f
             print(f"    (attempt {attempt + 1} failed, retrying...)")
 
     print(f"    ⚠ All {MAX_RETRIES + 1} attempts failed")
-    return [(int(round(ws * 1000)), int(round(we * 1000)), f"{fmt(ws)}-{fmt(we)} 분석 실패")]
+    return [
+        (int(round(ws * 1000)), int(round(we * 1000)), f"{fmt(ws)}-{fmt(we)} 분석 실패")
+    ]
 
 
 def reanalyze_same_start(
@@ -598,7 +611,7 @@ def parse_output(text: str, timestamps: list, ws: float, we: float) -> list:
     """
     scenes = []
     # Flexible pattern: matches "00:04", "00:04,000", or "00:04:000"
-    pattern = r"(\d{2}:\d{2}(?:[,:]\d{3})?)\s*[-–—]\s*(\d{2}:\d{2}(?:[,:]\d{3})?)\*?\*?\s*[:\s]\s*(.+)"
+    pattern = r"(\d{2}:\d{2}(?:[,:]\d{3})?)\s*[-–—]\s*(\d{2}:\d{2}(?:[,:]\d{3})?)\*?\*?\s*[:,\s]\s*(.+)"
 
     def parse_ts(ts_str: str) -> int:
         """Parse MM:SS, MM:SS,mmm, or MM:SS:mmm to integer milliseconds."""
@@ -639,7 +652,7 @@ def parse_output(text: str, timestamps: list, ws: float, we: float) -> list:
             desc = re.sub(r"^description:\s*", "", desc, flags=re.IGNORECASE).strip()
             desc = re.sub(r"\*\*|\*|`", "", desc).strip()
             desc = re.sub(r"^[-:]+\s*", "", desc).strip()
-            if desc:
+            if desc and not description_has_timecode(desc) and "\n" not in desc:
                 scenes.append((s_ms, e_ms, desc))
 
     if not scenes:
@@ -671,18 +684,18 @@ def reanalyze_window_boundary(
     prev_scenes = scenes_by_window.get(prev_idx, [])
     curr_scenes = scenes_by_window.get(curr_idx, [])
     if not prev_scenes or not curr_scenes:
-        return
+        return False, False, False
 
     last_prev = prev_scenes[-1]
     first_curr = curr_scenes[0]
     if first_curr[0] > last_prev[1] + 200:
-        return
+        return False, False, False
 
     combined_start_sec = last_prev[0] / 1000.0
     combined_end_sec = first_curr[1] / 1000.0
     combined_duration = combined_end_sec - combined_start_sec
     if combined_duration <= 0 or combined_duration > WINDOW_DURATION * 2:
-        return
+        return False, False, False
 
     b_frames, b_frame_timestamps = extract_frames_from_range(
         str(video_path),
@@ -692,7 +705,7 @@ def reanalyze_window_boundary(
         FRAME_SIZE,
     )
     if not b_frames:
-        return
+        return False, False, False
 
     re_scenes = reanalyze_boundary(
         model,
@@ -704,12 +717,23 @@ def reanalyze_window_boundary(
         combined_end_sec,
     )
 
+    old_prev_last = prev_scenes[-1]
+    old_curr_last = curr_scenes[-1]
     scenes_by_window[prev_idx] = normalize_absolute_scenes(prev_scenes[:-1])
     scenes_by_window[curr_idx] = normalize_absolute_scenes(re_scenes + curr_scenes[1:])
+    prev_last_changed = (
+        bool(scenes_by_window[prev_idx])
+        and scenes_by_window[prev_idx][-1] != old_prev_last
+    )
+    curr_last_changed = (
+        bool(scenes_by_window[curr_idx])
+        and scenes_by_window[curr_idx][-1] != old_curr_last
+    )
     print(
         f"  W{prev_idx + 1}/W{curr_idx + 1}: current cache absorbed "
         f"{len(re_scenes)} boundary scene(s)"
     )
+    return True, prev_last_changed, curr_last_changed
 
 
 def main():
@@ -748,6 +772,7 @@ def main():
     t0 = time.time()
     cached = 0
     scenes_by_window = {}
+    dirty_for_next = set()
 
     for i in range(num_w):
         ws = i * WINDOW_DURATION
@@ -761,6 +786,25 @@ def main():
                 scenes_by_window[i] = normalize_absolute_scenes(c)
                 cached += 1
                 print(f"  ✓ W{i + 1}/{num_w}: {fmt(ws)}-{fmt(we)} (cached)")
+                if i > 0 and (i - 1) in scenes_by_window and (i - 1) in dirty_for_next:
+                    updated, _prev_last_changed, curr_last_changed = (
+                        reanalyze_window_boundary(
+                            model,
+                            processor,
+                            config,
+                            video_path,
+                            duration,
+                            i - 1,
+                            i,
+                            scenes_by_window,
+                        )
+                    )
+                    if updated:
+                        save_cache(video_path, i, scenes_by_window[i])
+                        save_cache(video_path, i - 1, scenes_by_window[i - 1])
+                    dirty_for_next.discard(i - 1)
+                    if curr_last_changed:
+                        dirty_for_next.add(i)
                 continue
 
         pct = (i + 1) / num_w * 100
@@ -784,21 +828,27 @@ def main():
         try:
             scenes = analyze(model, processor, config, frames, frame_timestamps, ws, we)
             scenes_by_window[i] = normalize_window_scenes(scenes, ws_ms, we_ms)
+            dirty_for_next.add(i)
             print(f"    Total scenes collected: {count_scenes(scenes_by_window)}")
             for s, e, d in scenes_by_window[i]:
                 print(f"    → {fmt_ms(s)}-{fmt_ms(e)} {d[:60]}...")
 
             if i > 0:
-                reanalyze_window_boundary(
-                    model,
-                    processor,
-                    config,
-                    video_path,
-                    duration,
-                    i - 1,
-                    i,
-                    scenes_by_window,
+                updated, _prev_last_changed, curr_last_changed = (
+                    reanalyze_window_boundary(
+                        model,
+                        processor,
+                        config,
+                        video_path,
+                        duration,
+                        i - 1,
+                        i,
+                        scenes_by_window,
+                    )
                 )
+                dirty_for_next.discard(i - 1)
+                if curr_last_changed:
+                    dirty_for_next.add(i)
 
             print("    Saving cache...")
             save_cache(video_path, i, scenes_by_window[i])

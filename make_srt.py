@@ -12,11 +12,12 @@ import sys
 from pathlib import Path
 
 CACHE_DIR = ".scene_cache"
+TIMECODE_RE = re.compile(r"\b\d{2}:\d{2}(?:[,:]\d{3})?\b")
 
 
 def fmt_srt(value) -> str:
     """Format timestamp as SRT: HH:MM:SS,mmm
-    
+
     Handles both formats:
     - Integer milliseconds (e.g., 4000)
     - Float seconds (e.g., 4.0)
@@ -27,7 +28,7 @@ def fmt_srt(value) -> str:
     else:
         # Float seconds
         total_ms = round(value * 1000)
-    
+
     h = total_ms // 3600000
     m = (total_ms % 3600000) // 60000
     s = (total_ms % 60000) // 1000
@@ -47,6 +48,8 @@ def clean_description(desc: str) -> str:
     desc = re.sub(r"^\d{2}:\d{2}-\d{2}:\d{2}[:\s]*", "", desc)
     # Remove "analysis failed" messages
     if "analysis failed" in desc.lower():
+        return ""
+    if "\n" in desc or TIMECODE_RE.search(desc):
         return ""
     # Remove leading/trailing whitespace and angle brackets
     desc = desc.strip().strip("<>")

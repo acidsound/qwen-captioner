@@ -18,9 +18,12 @@ uv run make_srt.py path/to/video.mp4
 
 - timestamps are stored as integer milliseconds
 - prompts require `MM:SS,mmm-MM:SS,mmm` output
+- descriptions containing embedded timestamps are rejected and retried
 - boundary re-inference runs inline while processing each new window
 - when a boundary scene is merged, the current window cache absorbs that absolute
   scene, even if it starts before the nominal window boundary
+- `--resume` can refresh boundary merges around regenerated windows without
+  reprocessing every later window
 - final timeline assembly and SRT generation both merge adjacent identical scenes
 
 ## Cache

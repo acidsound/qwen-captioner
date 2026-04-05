@@ -51,6 +51,7 @@ Validation currently checks:
 
 - non-empty output
 - placeholder / boilerplate rejection
+- embedded timestamp text inside descriptions
 - start/end coverage of the analyzed window
 - no large gaps inside the window
 - no excessive repetition
@@ -116,6 +117,13 @@ Notes:
   that window's nominal start time
 
 `--resume` reloads these cache files and skips already processed windows.
+
+Resume behavior note:
+
+- when a cache file is regenerated, later cached windows do not get fully
+  reprocessed
+- only the adjacent boundary re-inference is refreshed as needed so merged scenes
+  around the regenerated window stay consistent
 
 ---
 
